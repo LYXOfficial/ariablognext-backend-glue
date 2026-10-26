@@ -1,0 +1,32 @@
+# ============================================================
+# ariablognext-backend-glue · 唯一配置入口
+# 与后端同一套约定：敏感值写 {{ env.X }}，启动时解析，缺了就报错退出。
+# 这里允许「内联占位符」（例如 "http://{{ env.HOST }}:8080"），
+# 因为没有密码类的值，内联不会破坏 YAML 结构。
+# ============================================================
+
+server:
+  # 留空 = 由 config 包读 PORT（Vercel 注入），读不到则 127.0.0.1:2334
+  listen: ""
+  # 单个请求的处理上限（必须大于 upstream.timeout）
+  timeout: 20s
+
+upstream:
+  # 新后端的地址，不带结尾斜杠
+  base: "{{ env.UPSTREAM }}"
+  timeout: 15s
+  # 透传给上游的请求头白名单（其余一律不转发，避免把浏览器的 Host 带过去）
+  forwardHeaders:
+    - Authorization
+    - Content-Type
+    - Accept
+
+cors:
+  allowOrigins: ["*"]
+  allowCredentials: true
+  allowHeaders: ["*"]
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+
+debug:
+  # true 时在响应头里带上 X-Upstream-Status，方便和旧后端逐条比对
+  echoUpstreamStatus: false

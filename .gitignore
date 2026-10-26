@@ -1,0 +1,16 @@
+config.local.yml
+.env
+.env.*
+!.env.example
+/bin/
+/server
+*.exe
+*.test
+*.out
+.vscode/
+.idea/
+.DS_Store
+
+# Python 冒烟脚本的缓存
+__pycache__/
+*.pyc

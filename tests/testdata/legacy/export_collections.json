@@ -1,0 +1,10 @@
+{
+ "collections": {
+  "Posts": [
+   {
+    "_id": "x"
+   }
+  ]
+ },
+ "message": "success"
+}

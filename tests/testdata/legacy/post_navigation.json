@@ -1,0 +1,11 @@
+{
+ "message": "success",
+ "next": {
+  "slug": "o",
+  "title": "旧"
+ },
+ "previous": {
+  "slug": "n",
+  "title": "新"
+ }
+}
