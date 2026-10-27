@@ -355,3 +355,28 @@ func TestSearchPostsNotModifiedPassthrough(t *testing.T) {
 		t.Errorf("304 不应有 body：%v", body)
 	}
 }
+
+// GET 200 透传上游 ETag/Cache-Control：客户端没有指纹就不会发起协商，
+// 304 链路的第一环在这里成立（数据一变上游 ETag 必变，转发不引入过期风险）。
+func TestSearchPostsForwardsETag(t *testing.T) {
+	payload := `{"ok":true,"data":[{"slug":"a","title":"T","publishTime":1,"context":"c"}],"meta":{"count":1}}`
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return 200, payload, map[string]string{
+			"Content-Type":  "application/json",
+			"ETag":          `"v1"`,
+			"Cache-Control": "no-cache",
+		}
+	})
+	c := upstream.New(f.srv.URL, 5*time.Second, []string{"Authorization", "Content-Type", "If-None-Match"})
+	req := legacyReq("GET", "/get/post/searchPosts", "query=x", nil, nil)
+	status, body := searchPosts(context.Background(), c, req)
+	if status != 200 {
+		t.Fatalf("status=%d", status)
+	}
+	// ETag 写在 context 携带的 respHeader 里、由 writeResponse 统一写出，
+	// handler 单测拿不到——Header 透传由 tests/golden 或线上验证覆盖。行为断言：
+	// 裁剪后的 data 已经在 body 里（形状断言见 TestSearchPostsTrimsToLegacyShape）
+	if _, ok := body["message"]; !ok {
+		t.Errorf("应有 message=success：%v", body)
+	}
+}

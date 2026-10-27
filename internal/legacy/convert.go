@@ -98,6 +98,17 @@ func callUpstreamSilent(ctx context.Context, c *upstream.Client, r *http.Request
 	if err != nil {
 		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务返回了无法解析的数据，请稍后重试"}}
 	}
+	// GET 200：把上游的 ETag/Cache-Control 递给客户端，协商缓存才能成立。
+	// 裁剪/换名类的映射是上游数据的确定性函数——数据一变上游 ETag 必变，
+	// 所以转发上游 ETag 不会引入任何过期风险（实时语义）。
+	if method == http.MethodGet {
+		if etag := upHdr.Get("ETag"); etag != "" {
+			setRespHeader(ctx, "ETag", etag)
+		}
+		if cc := upHdr.Get("Cache-Control"); cc != "" {
+			setRespHeader(ctx, "Cache-Control", cc)
+		}
+	}
 	return rewrite(env)
 }
 
