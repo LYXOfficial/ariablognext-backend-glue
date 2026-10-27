@@ -102,6 +102,23 @@ func TestLoad_EnvFileFallbackAndNoOverride(t *testing.T) {
 	}
 }
 
+func TestLoad_EmbeddedFallback(t *testing.T) {
+	// 模拟 Vercel：函数包里没有 config.yml，只能靠 embed.go 编进去的默认配置
+	dir := t.TempDir() // 不写任何文件
+	t.Setenv("UPSTREAM", "http://from-vercel-env:443")
+
+	cfg, err := Load(dir, dir)
+	if err != nil {
+		t.Fatalf("无 config.yml 时应回退到内嵌默认值: %v", err)
+	}
+	if cfg.Upstream.Base != "http://from-vercel-env:443" {
+		t.Errorf("base = %q", cfg.Upstream.Base)
+	}
+	if addr := cfg.ListenAddr(); addr != "127.0.0.1:2334" {
+		t.Errorf("默认监听 = %q", addr)
+	}
+}
+
 func TestExpandEnvPlaceholders_Inline(t *testing.T) {
 	t.Setenv("HOST_X", "1.2.3.4")
 	got, err := expandEnvPlaceholders("http://{{ env.HOST_X }}:8080")

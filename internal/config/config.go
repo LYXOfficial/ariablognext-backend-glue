@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	glue "github.com/LYXOfficial/ariablognext-backend-glue"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,12 +52,19 @@ type DebugConfig struct {
 
 // Load 读 envFileDir 下的 .env.dev / .env，再解析 dir/config.yml。
 // 两个目录通常都是同一个（进程工作目录），拆开只是为了测试方便。
+//
+// dir/config.yml 不存在时回退到编进二进制的默认配置（根目录 embed.go）：
+// Vercel 的 Go 函数包里没有仓库文件，线上全靠 embed + 环境变量；
+// 本地磁盘上有文件则以磁盘为准（改配置不用重新编译）。
 func Load(dir, envFileDir string) (*Config, error) {
 	loadEnvFiles(envFileDir)
 
 	raw, err := os.ReadFile(filepath.Join(dir, "config.yml"))
 	if err != nil {
-		return nil, fmt.Errorf("读 config.yml 失败: %w", err)
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("读 config.yml 失败: %w", err)
+		}
+		raw = glue.ConfigYAML // 编译期拷贝，见根目录 embed.go
 	}
 	expanded, err := expandEnvPlaceholders(string(raw))
 	if err != nil {
