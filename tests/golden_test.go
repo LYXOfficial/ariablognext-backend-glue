@@ -52,7 +52,7 @@ var cases = []goldenCase{
 	{name: "post_summary", method: "GET", path: "/get/post/postSummary", query: "slug=a",
 		upstream: `{"ok":true,"data":{"summary":"摘要文本"}}`},
 	{name: "search_posts", method: "GET", path: "/get/post/searchPosts", query: "query=肥鱼",
-		upstream: `{"ok":true,"data":[{"slug":"a","context":"...命中..."}],"meta":{"count":1}}`},
+		upstream: `{"ok":true,"data":[{"slug":"a","title":"肥鱼与旧题","publishTime":1761400000,"context":"...命中..."}],"meta":{"count":1}}`},
 	{name: "tag_info", method: "GET", path: "/get/tag/tagInfo", query: "tag=博客&startl=0&endl=20",
 		upstream: `{"ok":true,"data":[{"slug":"a"}],"meta":{"count":18}}`},
 	{name: "tag_count", method: "GET", path: "/get/tag/tagCount",

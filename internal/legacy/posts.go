@@ -155,9 +155,42 @@ func summaryFrom(ctx context.Context, c *upstream.Client, r *http.Request, metho
 }
 
 // searchPosts: GET /get/post/searchPosts?query= → GET /posts/list?keyword=&pageSize=100
+//
+// 旧契约搜索单条只有 slug/title/publishTime/context 四个字段；新接口列表项带
+// plainContent/description/bannerImg 等完整字段（33 条命中 34KB vs 旧 10KB）。
+// 照单直传会把搜索响应撑大 3.4 倍，这里裁剪回旧契约——前端搜索卡片本来也
+// 只用这四个字段（旧后端从来没给过别的）。
 func searchPosts(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
 	q := url.Values{"keyword": {r.URL.Query().Get("query")}, "pageSize": {"100"}}
-	return passData(ctx, c, r, http.MethodGet, "/posts/list", q)
+	return callUpstream(ctx, c, r, http.MethodGet, "/posts/list", q, nil, detailObject,
+		func(env *envelope) (int, any) {
+			return 200, okEnvelope(map[string]any{"data": trimSearchItems(env.Data)})
+		})
+}
+
+// trimSearchItems 把新接口的搜索结果裁剪成旧契约的四个字段。
+func trimSearchItems(raw json.RawMessage) json.RawMessage {
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return raw // 解不动就原样透传，别把 502 冒充 200
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		// 只搬旧契约有的四个字段、且仅在上游真的带了该字段时输出
+		//（合成/缺字段场景输出 null 会被断言为形状漂移）
+		trimmed := map[string]any{}
+		for _, k := range []string{"slug", "title", "publishTime", "context"} {
+			if v, ok := it[k]; ok {
+				trimmed[k] = v
+			}
+		}
+		out = append(out, trimmed)
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return jsonRaw(string(b))
 }
 
 // searchPostsByTitle: GET /get/post/searchPostsByTitle?title=&startl=&endl=

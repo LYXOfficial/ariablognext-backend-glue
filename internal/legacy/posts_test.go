@@ -304,3 +304,32 @@ func TestUpdatePostInfo_OtherErrorsPassThrough(t *testing.T) {
 		t.Error("500 要带 detail")
 	}
 }
+
+// 搜索结果裁剪：旧契约单条只有 slug/title/publishTime/context，
+// 新接口的完整字段（plainContent/description 等）不能照单转发——
+// 33 条命中会从 10KB 涨到 34KB（实测），中国访客的搜索响应拖大 3.4 倍。
+func TestSearchPostsTrimsToLegacyShape(t *testing.T) {
+	payload := `{"ok":true,"data":[{"slug":"a","title":"T","publishTime":123,"context":"ctx","plainContent":"很长的一段","description":"d"}]}`
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return 200, payload, map[string]string{"Content-Type": "application/json"}
+	})
+	status, body := run(t, searchPosts, f.client(), legacyReq("GET", "/get/post/searchPosts", "query=x", nil, nil))
+	if status != 200 {
+		t.Fatalf("status=%d", status)
+	}
+	raw, _ := json.Marshal(body["data"])
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) != 1 {
+		t.Fatalf("data 应为 1 条：%s", raw)
+	}
+	for _, k := range []string{"slug", "title", "publishTime", "context"} {
+		if _, ok := items[0][k]; !ok {
+			t.Errorf("旧契约字段 %s 缺失：%v", k, items[0])
+		}
+	}
+	for _, k := range []string{"plainContent", "description"} {
+		if _, ok := items[0][k]; ok {
+			t.Errorf("新字段 %s 不应出现在旧契约搜索结果里：%v", k, items[0])
+		}
+	}
+}
