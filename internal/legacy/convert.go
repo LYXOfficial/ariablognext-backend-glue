@@ -150,7 +150,7 @@ func queryInt(r *http.Request, key string, def int) int {
 //
 // 旧前端只有两种写法：?startl=0&endl=6（最新 6 篇）、?startl=32&endl=48（第 3 页）。
 // 换算规则（glue.md §3.3 / TASKS G1）：limit = endl-startl；page = startl/limit + 1；
-// endl 缺省时按 pageSize=100 处理。limit 兜底 16（旧前端未带 endl 的防御值）。
+// endl 缺省时按 pageSize=200 处理。limit 兜底 16（旧前端未带 endl 的防御值）。
 func paging(r *http.Request) url.Values {
 	q := url.Values{}
 	startl := queryInt(r, "startl", 0)
@@ -166,9 +166,11 @@ func paging(r *http.Request) url.Values {
 		limit = endl - startl
 	}
 	if limit <= 0 {
-		// endl 缺省 / 不合法：按 TASKS 约定 pageSize=100，页码同样按 100 一页换算
-		q.Set("page", strconv.Itoa(startl/100+1))
-		q.Set("pageSize", "100")
+		// endl 缺省 / 不合法：旧接口的 endl 缺省 = 返回到结尾，这里用新后端的
+		// maxPageSize=200 一页兜底。若文章数将来超过 200，这里会静默截断——
+		// 到时候要么循环翻页拼接，要么调大两侧上限，别只改一边。
+		q.Set("page", strconv.Itoa(startl/200+1))
+		q.Set("pageSize", "200")
 		return q
 	}
 	q.Set("page", strconv.Itoa(startl/limit+1))

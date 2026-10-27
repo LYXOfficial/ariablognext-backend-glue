@@ -24,7 +24,7 @@ func TestPostsInfo_PagingConversion(t *testing.T) {
 		{"首页 6 篇", "startl=0&endl=6", "1", "6", nil},
 		{"第 3 页 16 篇", "startl=32&endl=48", "3", "16", nil},
 		{"CardNewestPosts", "startl=0&endl=6", "1", "6", nil},
-		{"endl 缺省走 100", "startl=0", "1", "100", nil},
+		{"endl 缺省走 200（新后端 maxPageSize，见 convert.go paging 注释）", "startl=0", "1", "200", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -376,7 +376,12 @@ func TestSearchPostsForwardsETag(t *testing.T) {
 	// ETag 写在 context 携带的 respHeader 里、由 writeResponse 统一写出，
 	// handler 单测拿不到——Header 透传由 tests/golden 或线上验证覆盖。行为断言：
 	// 裁剪后的 data 已经在 body 里（形状断言见 TestSearchPostsTrimsToLegacyShape）
-	if _, ok := body["message"]; !ok {
-		t.Errorf("应有 message=success：%v", body)
+	// body 的静态类型是 any，先断言成旧格式响应体再取键
+	bodyMap, ok := body.(map[string]any)
+	if !ok {
+		t.Fatalf("响应体应为旧格式 map：%T %v", body, body)
+	}
+	if _, ok := bodyMap["message"]; !ok {
+		t.Errorf("应有 message=success：%v", bodyMap)
 	}
 }

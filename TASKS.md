@@ -107,7 +107,7 @@ tests/
 
 | 旧参数 | 新参数 | 规则 |
 |---|---|---|
-| `startl` / `endl` | `page` / `pageSize` | `limit = endl-startl`；`page = startl/limit + 1`；`endl` 缺省 → `pageSize=100` |
+| `startl` / `endl` | `page` / `pageSize` | `limit = endl-startl`；`page = startl/limit + 1`；`endl` 缺省 → `pageSize=200`（新后端 maxPageSize，2026-10-27 从 100 上调，见 convert.go 注释） |
 | `type=full` | `pageSize=full&withContent=true` | 全量，不要循环翻页 |
 | `query` | `keyword` | |
 | `title` | `keyword` + `titleOnly=true` | |
