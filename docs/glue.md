@@ -291,10 +291,11 @@ out["next"]     = data["older"]
 | 旧 | 语义 | 新 |
 |---|---|---|
 | `GET /get/post/postSummary` | **公开**，缓存优先，miss 则生成一次 | `GET /posts/summary`（公开，行为一致）|
-| `GET /update/post/summary` | 后台，**只读缓存**，不触发生成 | 同一个 `GET /posts/summary` |
+| `GET /update/post/summary` | 后台，**只读缓存**，不触发生成 | `GET /posts/summary?slug=…&generate=false`（上游 2026-10-27 新增的可选参数，GO-007；不传时行为与公开一致，契约未改）|
 
-后台那条的唯一差别是「不该花 SiliconFlow 额度」。因为每篇最多生成一次且结果落库，
-后台读到无缓存的概率极低，所以直接复用公开接口，不再单开一条。
+后台那条必须加 `generate=false`：dashboard 打开编辑弹窗就会调它，若复用「miss 生成」
+的公开语义，弹窗会静默等最长 90s 并烧一次 SiliconFlow 额度。无缓存时上游返回
+`data.summary=null`，重排成旧形状 `{"message":"success","data":null}`。
 
 ### 5.5 RSS 的全量拉取
 
@@ -307,6 +308,31 @@ out["next"]     = data["older"]
 
 旧 `archiveInfo` 在区间内没有文章时返回 **404**（不是空数组），前端据此显示「这个月没有文章」。
 胶水必须照抄，别顺手改成 200。
+
+
+### 5.7 写接口「目标不存在」的静默成功（2026-10-27，sync GO-002）
+
+旧后端的 update 类写接口 `update_one` 之后**不看 matched_count**，目标不存在照样
+`{"message":"success"}`。新后端按自家契约回 404/400 not_found。胶水必须翻译回静默
+成功，否则 dashboard 会在「文章刚被另一个标签页删掉」这类场景看到旧版没有的报错：
+
+| 旧接口 | 新后端的「不存在」错误 | 胶水输出 |
+|---|---|---|
+| `PUT /update/post/updatePostInfo` / `updatePostMarkdown` | 404 `post.not_found` | 200 `{"message":"success"}` |
+| `PUT /update/draft/updateDraftInfo` / `updateDraftMarkdown` | 404 `draft.not_found` | 同上 |
+| `PUT /update/speaks/updateSpeaks` | 400 `validation.invalid_field`（message 恰为「该时间戳的说说不存在」） | 同上 |
+| `PUT /update/flink/updateFlink`、`PUT /update/flink/updateGroup`、`POST /update/flink/moveFlinkGroup` | 404 `link.not_found` | 同上 |
+
+只吞确认的 not_found；500 与其它校验错误照常透传。
+
+**addFlink 的 upsert**：旧实现是 `update_one(..., upsert=True)`——分组不存在会**静默
+建组**再塞链。胶水在转发 `/links/create` 前先查组（`GET /links/list`）、缺则
+`POST /links/groups/create`（order/description 用缺省值；409 `link.group_conflict`
+视为并发建组成功）；创建仍撞 `link.not_found` 就再补一轮，两轮后按旧契约回 success。
+
+**刻意不映射的一条**：`POST /update/flink/addGroup` 重名时旧后端会真的插入一条重复
+分组，新后端回 409 `link.group_conflict`。胶水不把它翻译回静默成功——假装建成功但
+实际没建比让 dashboard 看到「分组名已存在」更糟，且正常流程 dashboard 不允许重名。
 
 ---
 

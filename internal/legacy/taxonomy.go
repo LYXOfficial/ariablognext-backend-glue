@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/LYXOfficial/ariablognext-backend-glue/internal/upstream"
 )
@@ -140,13 +141,14 @@ func addDraft(ctx context.Context, c *upstream.Client, r *http.Request) (int, an
 }
 
 // updateDraftInfo: PUT /update/draft/updateDraftInfo → PUT /drafts/update
+// 草稿不存在旧后端也是静默成功，翻译回 success（GO-002）。
 func updateDraftInfo(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPut, "/drafts/update")
+	return forwardBodySilent(ctx, c, r, http.MethodPut, "/drafts/update", codeIn("draft.not_found"))
 }
 
 // updateDraftMarkdown: PUT /update/draft/updateDraftMarkdown → PUT /drafts/content
 func updateDraftMarkdown(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPut, "/drafts/content")
+	return forwardBodySilent(ctx, c, r, http.MethodPut, "/drafts/content", codeIn("draft.not_found"))
 }
 
 // deleteDraft: DELETE /update/draft/deleteDraft（body {slug}）→ DELETE /drafts/delete?slug=
@@ -155,9 +157,10 @@ func deleteDraft(ctx context.Context, c *upstream.Client, r *http.Request) (int,
 }
 
 // updatePostSummaryRead: GET /update/post/summary?slug=（后台只读缓存）
-// → GET /posts/summary?slug=（同一个公开接口，见 glue.md §5.4）
+// → GET /posts/summary?slug=&generate=false：旧后台预览是「只读缓存，绝不生成」
+// （GO-007），cacheOnly 让 glue 追加 generate=false，无缓存时旧形状 data:null。
 func updatePostSummaryRead(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return summaryFrom(ctx, c, r, http.MethodGet)
+	return summaryFrom(ctx, c, r, http.MethodGet, true)
 }
 
 // ---------- 说说 ----------
@@ -178,8 +181,31 @@ func newSpeaks(ctx context.Context, c *upstream.Client, r *http.Request) (int, a
 }
 
 // updateSpeaks: PUT /update/speaks/updateSpeaks → PUT /speaks/update
+// 旧后端对不存在的说说也是静默成功；新后端把它归进参数校验错误
+// （validation.invalid_field，GO-002/GO-004）。
+// 判据优先锚定结构：details.fields 里有 field=="time"（契约 §0.2 固定形态，
+// go 侧有 TestSpeakUpdateNotFoundShapeIsStable 钉住）；message 含「说说不存在」
+// 只作兜底（或关系，避免单点失效）。其它校验错误照常透传。
 func updateSpeaks(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPut, "/speaks/update")
+	return forwardBodySilent(ctx, c, r, http.MethodPut, "/speaks/update",
+		func(err *errorInfo) bool {
+			if err == nil || err.Code != "validation.invalid_field" {
+				return false
+			}
+			var d struct {
+				Fields []struct {
+					Field string `json:"field"`
+				} `json:"fields"`
+			}
+			if json.Unmarshal(err.Details, &d) == nil {
+				for _, f := range d.Fields {
+					if f.Field == "time" {
+						return true
+					}
+				}
+			}
+			return strings.Contains(err.Message, "说说不存在")
+		})
 }
 
 // deleteSpeaks: DELETE /update/speaks/deleteSpeaks（body {time}）→ DELETE /speaks/delete?time=

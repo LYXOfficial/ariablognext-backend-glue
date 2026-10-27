@@ -30,6 +30,8 @@ type capture struct {
 type fakeUpstream struct {
 	srv  *httptest.Server
 	last *capture
+	// history 记录全部请求（addFlink 的 upsert 仿真要断言「先查组、再建组、再塞链」的顺序）
+	history []*capture
 	// respond 按请求返回状态码、响应体与响应头
 	respond func(c *capture) (int, string, map[string]string)
 }
@@ -39,14 +41,16 @@ func newFakeUpstream(t *testing.T, respond func(c *capture) (int, string, map[st
 	f := &fakeUpstream{respond: respond}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		f.last = &capture{
+		cap := &capture{
 			Method:  r.Method,
 			Path:    r.URL.Path,
 			Query:   r.URL.Query(),
 			Headers: r.Header.Clone(),
 			Body:    body,
 		}
-		status, respBody, hdr := f.respond(f.last)
+		f.last = cap
+		f.history = append(f.history, cap)
+		status, respBody, hdr := f.respond(cap)
 		for k, v := range hdr {
 			w.Header().Set(k, v)
 		}

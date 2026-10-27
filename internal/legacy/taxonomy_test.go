@@ -1,6 +1,7 @@
 package legacy
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -160,6 +161,21 @@ func TestPostSummary_PublicAndAdminRead(t *testing.T) {
 	if f.last.Headers.Get("Authorization") != "Bearer x" {
 		t.Error("后台 summary 的 Authorization 要透传")
 	}
+	// 后台只读必须带 generate=false（GO-007：绝不触发生成）；公开不带
+	if f.last.Query.Get("generate") != "false" {
+		t.Errorf("后台 summary 应带 generate=false: %v", f.last.Query)
+	}
+}
+
+func TestPostSummary_PublicNoGenerateParam(t *testing.T) {
+	// 公开接口保持「miss 生成一次」语义，不能带 generate=false（GO-007）
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return okResp(`{"summary":null}`, "")
+	})
+	run(t, postSummary, f.client(), legacyReq("GET", "/get/post/postSummary", "slug=a", nil, nil))
+	if _, ok := f.last.Query["generate"]; ok {
+		t.Errorf("公开 summary 不应带 generate 参数: %v", f.last.Query)
+	}
 }
 
 func TestPostSummary_NullSummary(t *testing.T) {
@@ -231,5 +247,53 @@ func TestRefreshSummary(t *testing.T) {
 	}
 	if !strings.Contains(string(f.last.Body), `"slug":"a"`) {
 		t.Errorf("body 应原样转发: %s", f.last.Body)
+	}
+}
+
+// ---------- 写接口「目标不存在」静默成功（GO-002） ----------
+
+func TestUpdateDraftInfo_MissingTargetSilentSuccess(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(404, "draft.not_found", "没有找到这篇草稿", "null")
+	})
+	r := legacyReq("PUT", "/update/draft/updateDraftInfo", "", []byte(`{"slug":"gone","title":"t"}`), nil)
+	status, body := run(t, updateDraftInfo, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("not_found 应静默成功: status=%d body=%v", status, body)
+	}
+}
+
+func TestUpdateSpeaks_MissingSilent_OtherValidationPasses(t *testing.T) {
+	// 判据三条(GO-004):① 结构 details.fields[].field=="time"(文案可变)→静默;
+	// ② message 含「说说不存在」兜底 → 静默;③ 其它字段的校验错误 → 透传
+	i := 0
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		i++
+		switch i {
+		case 1: // 结构判据:message 已改但 details.fields 锚定 time
+			return 400, `{"ok":false,"requestId":"t","error":{"code":"validation.invalid_field","message":"该时间戳没有对应的说说","details":{"fields":[{"field":"time","message":"不存在"}]}}}`, map[string]string{"Content-Type": "application/json"}
+		case 2: // 文案兜底:details 缺失但 message 命中
+			return errResp(400, "validation.invalid_field", "该时间戳的说说不存在", "null")
+		default: // 其它字段错误透传
+			return errResp(400, "validation.invalid_field", "content 不能为空", "null")
+		}
+	})
+	req := func() *http.Request {
+		return legacyReq("PUT", "/update/speaks/updateSpeaks", "", []byte(`{"time":1,"content":"x"}`), nil)
+	}
+	status, body := run(t, updateSpeaks, f.client(), req())
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("结构判据应静默成功: status=%d body=%v", status, body)
+	}
+	status, body = run(t, updateSpeaks, f.client(), req())
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("文案兜底应静默成功: status=%d body=%v", status, body)
+	}
+	status, body = run(t, updateSpeaks, f.client(), req())
+	if status != 400 {
+		t.Fatalf("其它校验错误应透传: status=%d", status)
+	}
+	if _, ok := body["detail"]; !ok {
+		t.Error("透传错误要带 detail")
 	}
 }

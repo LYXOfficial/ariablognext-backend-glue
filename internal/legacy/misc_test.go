@@ -2,8 +2,12 @@ package legacy
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ---------- 图片：三层嵌套是刻意的 ----------
@@ -102,6 +106,29 @@ func TestSitemapGen_RawXMLPassThrough(t *testing.T) {
 	}
 }
 
+func TestSitemapGen_UpstreamError_NoEnvelopeLeak(t *testing.T) {
+	// 上游挂掉时回的是新信封 JSON；透传会把 {"ok":false,...} 泄漏给爬虫，
+	// 必须换成旧格式的 detail 对象
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return 500, `{"ok":false,"requestId":"t","error":{"code":"db.failed","message":"boom","details":null}}`,
+			map[string]string{"Content-Type": "application/json"}
+	})
+	r := legacyReq("GET", "/get/sitemap/sitemapGen", "", nil, nil)
+	ctx, _ := withRespHeader(r.Context())
+	status, body := sitemapGen(ctx, f.client(), r)
+	if status != 502 {
+		t.Fatalf("status=%d", status)
+	}
+	m, ok := body.(map[string]any)
+	if !ok {
+		t.Fatalf("应为 JSON 对象而非原始字节: %#v", body)
+	}
+	detail, _ := m["detail"].(map[string]any)
+	if detail["message"] != "fail" || detail["error"] == "" {
+		t.Errorf("detail 形态不对: %v", m)
+	}
+}
+
 // ---------- export：secret 挪头 + collections 提顶 ----------
 
 func TestExportCollections(t *testing.T) {
@@ -147,8 +174,15 @@ func TestExportCollections_BadSecret(t *testing.T) {
 // ---------- site / misc ----------
 
 func TestLatestUpdateTimeWrite(t *testing.T) {
+	// refreshCache 是 fire-and-forget 的真实公网调用，测试里必须换掉，
+	// 并用 channel 等 goroutine 真正跑完再断言
+	fired := make(chan struct{})
+	orig := notifyRefreshCache
+	notifyRefreshCache = func() { close(fired) }
+	defer func() { notifyRefreshCache = orig }()
+
 	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
-		return okResp(`{"updated":true}`, "")
+		return okResp(`{"updated":true,"latestUpdateTime":1761400000}`, "")
 	})
 	r := legacyReq("POST", "/update/siteInfo/latestUpdateTime", "", nil,
 		map[string]string{"Authorization": "Bearer tok"})
@@ -159,6 +193,65 @@ func TestLatestUpdateTimeWrite(t *testing.T) {
 	if f.last.Method != "POST" || f.last.Path != "/site/update-time" {
 		t.Errorf("上游收到 %s %s", f.last.Method, f.last.Path)
 	}
+	// 旧后端忽略请求体、永远写当前时间：转发时 body 必须是 `{}`——既丢弃了
+	// 旧调用方的 {"time":N} 覆写，又满足新后端「至少一个 JSON 对象」的要求
+	// （真机实测：完全无 body 新后端回 400）
+	if string(f.last.Body) != "{}" {
+		t.Errorf("上游应收到 {}，实际 %q", f.last.Body)
+	}
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Error("转发成功后没有触发 refreshCache 通知")
+	}
+}
+
+func TestLatestUpdateTimeWrite_UpstreamFail_NoRefresh(t *testing.T) {
+	// 上游失败时不能触发 refreshCache（旧后端写库失败也不调它）
+	fired := make(chan struct{})
+	orig := notifyRefreshCache
+	notifyRefreshCache = func() { close(fired) }
+	defer func() { notifyRefreshCache = orig }()
+
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(500, "site.update_failed", "写时间戳失败", "null")
+	})
+	r := legacyReq("POST", "/update/siteInfo/latestUpdateTime", "", nil, nil)
+	status, body := run(t, latestUpdateTimeWrite, f.client(), r)
+	if status != 500 {
+		t.Fatalf("status=%d", status)
+	}
+	if _, ok := body["detail"]; !ok {
+		t.Errorf("失败要带 detail: %v", body)
+	}
+	select {
+	case <-fired:
+		t.Error("上游失败不应触发 refreshCache")
+	default:
+	}
+}
+
+func TestNotifyRefreshCache_SwallowsErrors(t *testing.T) {
+	// 通知失败（连不上 / 非 2xx）必须安静吞掉，不能 panic、不能有返回值
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	origURL, origClient := refreshCacheURL, refreshCacheClient
+	t.Cleanup(func() { refreshCacheURL, refreshCacheClient = origURL, origClient })
+	refreshCacheURL = srv.URL
+	refreshCacheClient = srv.Client()
+
+	notifyRefreshCache() // 500 也算「尽力而为」，不报错
+	if hits != 1 {
+		t.Errorf("通知请求应发出 1 次，实际 %d", hits)
+	}
+
+	refreshCacheURL = "http://127.0.0.1:1/unreachable"
+	notifyRefreshCache() // 连不上也不许 panic
 }
 
 func TestFlinksAndFlinkCount(t *testing.T) {

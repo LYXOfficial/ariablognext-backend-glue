@@ -57,14 +57,103 @@ func themeColor(ctx context.Context, c *upstream.Client, r *http.Request) (int, 
 }
 
 // addFlink: POST /update/flink/addFlink → POST /links/create
-// 字段名两边一致（group/id/name/url/avatar/description/color/latency），原样转发。
+// 字段名两边一致（group/id/name/url/avatar/description/color/latency）。
+// 旧后端是 update_one(..., upsert=True)：分组不存在会**静默建组**再塞链
+// （update/flink/main.py addFlink）。新 /links/create 要求分组已存在
+// （404 link.not_found），所以先保证组在、再转发创建；创建仍撞上
+// link.not_found（查建之间组被删的竞态）就再补一轮，两轮后按旧契约回 success。
 func addFlink(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPost, "/links/create")
+	body, err := readBody(r)
+	if err != nil {
+		return 400, map[string]any{"detail": map[string]any{"message": "fail", "error": "请求体读取失败，请重试"}}
+	}
+	var b struct {
+		Group string `json:"group"`
+	}
+	if err := json.Unmarshal(body, &b); err != nil || b.Group == "" {
+		return 400, map[string]any{"detail": map[string]any{"message": "fail", "error": "请求缺少 group 字段"}}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if status, resp := ensureFlinkGroup(ctx, c, r, b.Group); status != 0 {
+			return status, resp
+		}
+		status, raw, err := c.Do(ctx, http.MethodPost, "/links/create", nil, json.RawMessage(body), forwardHeaders(r))
+		if err != nil {
+			return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务暂时不可用，请稍后重试"}}
+		}
+		if status < 400 {
+			if _, decErr := decodeEnvelope(raw); decErr != nil {
+				return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务返回了无法解析的数据，请稍后重试"}}
+			}
+			return 200, okEnvelope(nil)
+		}
+		env, decErr := decodeEnvelope(raw)
+		if decErr == nil && env.Error != nil && env.Error.Code == "link.not_found" {
+			continue // 组在 ensure 与 create 之间被删，重走一轮
+		}
+		if decErr != nil || env.Error == nil {
+			return failBody(status, pathOf(r), &errorInfo{Code: "upstream.failed", Message: "服务内部错误，请稍后重试", Details: jsonRaw(string(raw))})
+		}
+		return failBody(status, pathOf(r), env.Error)
+	}
+	// 两轮都被竞态打断：最后一次 ensure 已把组建回，按旧契约静默成功
+	return 200, okEnvelope(nil)
+}
+
+// ensureFlinkGroup 保证分组存在（旧 addFlink upsert 的前半段）。
+// 返回 (0, nil) 表示组已在或已建好；否则把要回给客户端的错误原样带出。
+func ensureFlinkGroup(ctx context.Context, c *upstream.Client, r *http.Request, group string) (int, any) {
+	// 查组用列表接口（友链总量百级，一次拉全没问题）；列表是公开读，Authorization 透传无害
+	status, raw, err := c.Do(ctx, http.MethodGet, "/links/list", nil, nil, forwardHeaders(r))
+	if err != nil {
+		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务暂时不可用，请稍后重试"}}
+	}
+	if status >= 400 {
+		env, decErr := decodeEnvelope(raw)
+		if decErr != nil || env.Error == nil {
+			return failBody(status, pathOf(r), &errorInfo{Code: "upstream.failed", Message: "服务内部错误，请稍后重试", Details: jsonRaw(string(raw))})
+		}
+		return failBody(status, pathOf(r), env.Error)
+	}
+	env, err := decodeEnvelope(raw)
+	if err != nil {
+		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务返回了无法解析的数据，请稍后重试"}}
+	}
+	var groups []struct {
+		Name string `json:"name"`
+	}
+	if err := decodeInto(env.Data, &groups); err != nil {
+		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务返回了无法解析的数据，请稍后重试"}}
+	}
+	for _, g := range groups {
+		if g.Name == group {
+			return 0, nil
+		}
+	}
+	// 旧 upsert 建出的组只有 name；order/description 用新接口的缺省值
+	st, raw, err := c.Do(ctx, http.MethodPost, "/links/groups/create", nil,
+		map[string]any{"name": group, "order": 0, "description": ""}, forwardHeaders(r))
+	if err != nil {
+		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务暂时不可用，请稍后重试"}}
+	}
+	if st >= 400 {
+		// 并发下别的请求刚好把组建好了：409 当成功，继续塞链
+		env, decErr := decodeEnvelope(raw)
+		if decErr == nil && env.Error != nil && env.Error.Code == "link.group_conflict" {
+			return 0, nil
+		}
+		if decErr != nil || env.Error == nil {
+			return failBody(st, pathOf(r), &errorInfo{Code: "upstream.failed", Message: "服务内部错误，请稍后重试", Details: jsonRaw(string(raw))})
+		}
+		return failBody(st, pathOf(r), env.Error)
+	}
+	return 0, nil
 }
 
 // updateFlink: PUT /update/flink/updateFlink → PUT /links/update
+// 友链不存在旧后端也是静默成功，翻译回 success（GO-002）。
 func updateFlink(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPut, "/links/update")
+	return forwardBodySilent(ctx, c, r, http.MethodPut, "/links/update", codeIn("link.not_found"))
 }
 
 // deleteFlink: DELETE /update/flink/deleteFlink?group=&id= → DELETE /links/delete?group=&id=
@@ -78,6 +167,7 @@ func deleteFlink(ctx context.Context, c *upstream.Client, r *http.Request) (int,
 // moveFlinkGroup: POST /update/flink/moveFlinkGroup → POST /links/move
 // 旧字段 from_group/to_group/link_id 是 snake_case，新接口是
 // fromGroup/toGroup/id——这里必须改名，别原样转发。
+// 链接或源分组不存在旧后端也是静默成功，翻译回 success（GO-002）。
 func moveFlinkGroup(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
 	body, err := readBody(r)
 	if err != nil {
@@ -91,23 +181,26 @@ func moveFlinkGroup(ctx context.Context, c *upstream.Client, r *http.Request) (i
 	if err := json.Unmarshal(body, &old); err != nil {
 		return 400, map[string]any{"detail": map[string]any{"message": "fail", "error": "请求体格式不正确"}}
 	}
-	return callUpstream(ctx, c, r, http.MethodPost, "/links/move", nil, map[string]any{
+	return callUpstreamSilent(ctx, c, r, http.MethodPost, "/links/move", nil, map[string]any{
 		"fromGroup": old.FromGroup,
 		"toGroup":   old.ToGroup,
 		"id":        old.LinkID,
-	}, detailObject, func(env *envelope) (int, any) { return 200, okEnvelope(nil) })
+	}, detailObject, codeIn("link.not_found"), func(env *envelope) (int, any) { return 200, okEnvelope(nil) })
 }
 
 // addGroup: POST /update/flink/addGroup → POST /links/groups/create（{name,order,description} 一致）
+// 注意：重名时旧后端 insert_one 会**真的插入一条重复分组**（然后列表里出现两个同名组），
+// 新后端回 409 link.group_conflict。这条不映射回静默成功——假装建成功但实际没建，
+// 比让 dashboard 看到「分组名已存在」更糟；正常流程 dashboard 本来就不允许重名。
 func addGroup(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
 	return forwardBody(ctx, c, r, http.MethodPost, "/links/groups/create")
 }
 
 // updateGroup: PUT /update/flink/updateGroup → PUT /links/groups/update
-// 旧字段 old_name → 新字段 oldName。
+// 旧字段 old_name → 新字段 oldName。组不存在旧后端也是静默成功（GO-002）。
 func updateGroup(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
 	return renameBody(ctx, c, r, http.MethodPut, "/links/groups/update",
-		map[string]string{"old_name": "oldName"})
+		map[string]string{"old_name": "oldName"}, codeIn("link.not_found"))
 }
 
 // deleteGroup: DELETE /update/flink/deleteGroup?name= → DELETE /links/groups/delete?name=
@@ -307,18 +400,27 @@ func pushFlinkStatus(ctx context.Context, c *upstream.Client, r *http.Request) (
 func forwardBody(ctx context.Context, c *upstream.Client, r *http.Request,
 	method, upstreamPath string,
 ) (int, any) {
+	return forwardBodySilent(ctx, c, r, method, upstreamPath, nil)
+}
+
+// forwardBodySilent 同 forwardBody，但上游错误命中 match 时按旧契约静默成功
+// （见 callUpstreamSilent 的注释，GO-002）。
+func forwardBodySilent(ctx context.Context, c *upstream.Client, r *http.Request,
+	method, upstreamPath string, match silentMatch,
+) (int, any) {
 	body, err := readBody(r)
 	if err != nil {
 		return 400, map[string]any{"detail": map[string]any{"message": "fail", "error": "请求体读取失败，请重试"}}
 	}
-	return callUpstream(ctx, c, r, method, upstreamPath, nil, json.RawMessage(body), detailObject,
+	return callUpstreamSilent(ctx, c, r, method, upstreamPath, nil, json.RawMessage(body), detailObject, match,
 		func(env *envelope) (int, any) { return 200, okEnvelope(nil) })
 }
 
 // renameBody 按 mapping 把旧字段名改成新字段名后转发（值原样保留）。
 // 只用于 moveFlinkGroup / updateGroup 这类 snake_case → camelCase 的差异。
+// match 非 nil 时，「目标不存在」类错误按旧契约静默成功。
 func renameBody(ctx context.Context, c *upstream.Client, r *http.Request,
-	method, upstreamPath string, mapping map[string]string,
+	method, upstreamPath string, mapping map[string]string, match silentMatch,
 ) (int, any) {
 	body, err := readBody(r)
 	if err != nil {
@@ -336,7 +438,7 @@ func renameBody(ctx context.Context, c *upstream.Client, r *http.Request,
 			renamed[key] = value
 		}
 	}
-	return callUpstream(ctx, c, r, method, upstreamPath, nil, renamed, detailObject,
+	return callUpstreamSilent(ctx, c, r, method, upstreamPath, nil, renamed, detailObject, match,
 		func(env *envelope) (int, any) { return 200, okEnvelope(nil) })
 }
 

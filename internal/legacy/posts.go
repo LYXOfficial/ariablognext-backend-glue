@@ -124,15 +124,21 @@ func relatedPosts(ctx context.Context, c *upstream.Client, r *http.Request) (int
 
 // postSummary: GET /get/post/postSummary?slug= → GET /posts/summary?slug=
 // 新接口 data={"summary":"…"}，旧接口 data 就是字符串本身。
+// 公开语义允许「缓存 miss 生成一次」，与旧公开接口一致（不加 generate）。
 func postSummary(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return summaryFrom(ctx, c, r, http.MethodGet)
+	return summaryFrom(ctx, c, r, http.MethodGet, false)
 }
 
 // summaryFrom 处理两种 postSummary 语义（glue.md §5.4）：
-// 公开 GET 与后台只读 GET 都转调 GET /posts/summary（后者不该触发 regenerate
-// 属已知取舍：直接复用公开接口）。
-func summaryFrom(ctx context.Context, c *upstream.Client, r *http.Request, method string) (int, any) {
+// 公开 GET 转调 GET /posts/summary（缓存 miss 生成一次）；后台只读 GET 加
+// generate=false——旧后台预览是「只读缓存，绝不生成」（GO-007），不分开的话
+// dashboard 打开编辑弹窗会静默等最长 90s 并烧一次 SiliconFlow 额度。
+// 上游无缓存时 data.summary=null，重排成旧形状 data:null。
+func summaryFrom(ctx context.Context, c *upstream.Client, r *http.Request, method string, cacheOnly bool) (int, any) {
 	q := url.Values{"slug": {r.URL.Query().Get("slug")}}
+	if cacheOnly {
+		q.Set("generate", "false")
+	}
 	return callUpstream(ctx, c, r, method, "/posts/summary", q, nil, detailObject,
 		func(env *envelope) (int, any) {
 			var data struct {
@@ -184,13 +190,14 @@ func addPost(ctx context.Context, c *upstream.Client, r *http.Request) (int, any
 }
 
 // updatePostInfo: PUT /update/post/updatePostInfo → PUT /posts/update
+// 文章不存在旧后端也是静默成功（update_one 不看 matched_count），翻译回 success。
 func updatePostInfo(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPut, "/posts/update")
+	return forwardBodySilent(ctx, c, r, http.MethodPut, "/posts/update", codeIn("post.not_found"))
 }
 
 // updatePostMarkdown: PUT /update/post/updatePostMarkdown → PUT /posts/content
 func updatePostMarkdown(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	return forwardBody(ctx, c, r, http.MethodPut, "/posts/content")
+	return forwardBodySilent(ctx, c, r, http.MethodPut, "/posts/content", codeIn("post.not_found"))
 }
 
 // deletePost: DELETE /update/post/deletePost（body {slug}）→ DELETE /posts/delete?slug=

@@ -31,6 +31,40 @@ func callUpstream(ctx context.Context, c *upstream.Client, r *http.Request,
 	method, upstreamPath string, q url.Values, body any, kind detailKind,
 	rewrite func(env *envelope) (int, any),
 ) (int, any) {
+	return callUpstreamSilent(ctx, c, r, method, upstreamPath, q, body, kind, nil, rewrite)
+}
+
+// silentMatch 判断一个上游错误是否属于「旧契约会静默成功」的类型。
+type silentMatch func(err *errorInfo) bool
+
+// codeIn 按上游 error.code 匹配（not_found 类错误码）。
+func codeIn(codes ...string) silentMatch {
+	return func(err *errorInfo) bool {
+		if err == nil {
+			return false
+		}
+		for _, c := range codes {
+			if err.Code == c {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// callUpstreamSilent 与 callUpstream 相同，但上游错误命中 match 时改判为旧契约的
+// 静默成功（200 {"message":"success"}）。
+//
+// 背景（sync GO-002）：旧后端的 update 类写接口 update_one 之后不看 matched_count，
+// 目标不存在照样 {"message":"success"}，glue.md §4.3 的响应列同样只有 success。
+// 新后端按自家契约回 404/400 not_found——不翻译回去的话，dashboard 会在
+// 「文章刚被另一个标签页删掉」这类场景看到旧版没有的报错。
+// 只有命中 match 的错误被吞，其它 4xx/5xx 照常透传，500 绝不吞。
+func callUpstreamSilent(ctx context.Context, c *upstream.Client, r *http.Request,
+	method, upstreamPath string, q url.Values, body any, kind detailKind,
+	match silentMatch,
+	rewrite func(env *envelope) (int, any),
+) (int, any) {
 	status, raw, err := c.Do(ctx, method, upstreamPath, q, body, forwardHeaders(r))
 	if err != nil {
 		// 连不上新后端：转成 502，文案说清楚是胶水这层的事
@@ -38,6 +72,9 @@ func callUpstream(ctx context.Context, c *upstream.Client, r *http.Request,
 	}
 	if status >= 400 {
 		env, decErr := decodeEnvelope(raw)
+		if decErr == nil && match != nil && match(env.Error) {
+			return 200, okEnvelope(nil)
+		}
 		if decErr != nil || env.Error == nil {
 			// 非 JSON 或缺错误信封：把原文塞进 cause 位，别静默吞掉
 			return failBody(status, pathOf(r), &errorInfo{

@@ -21,7 +21,9 @@ func sitemapGen(ctx context.Context, c *upstream.Client, r *http.Request) (int, 
 	setRespHeader(ctx, "Content-Type", hdr.Get("Content-Type"))
 	// 原始字节（不是 map）：mux 层遇到 []byte 直接写出、不再 JSON 编码
 	if status >= 400 {
-		return status, raw
+		// 旧后端的 sitemap 是自己生成的，失败只会是数据库抖动，返回的是
+		// detail 对象——绝不能把上游的新信封 JSON 原样透给爬虫
+		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "站点地图暂时不可用，请稍后重试"}}
 	}
 	return 200, raw
 }

@@ -272,3 +272,35 @@ func TestUpstreamNetworkDown(t *testing.T) {
 		t.Errorf("detail 形状错误: %v", body["detail"])
 	}
 }
+
+// ---------- 写接口「目标不存在」静默成功（GO-002） ----------
+
+func TestUpdatePostInfo_MissingTargetSilentSuccess(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(404, "post.not_found", "没有找到这篇文章", "null")
+	})
+	r := legacyReq("PUT", "/update/post/updatePostInfo", "", []byte(`{"slug":"gone","title":"t"}`),
+		map[string]string{"Authorization": "Bearer tok"})
+	status, body := run(t, updatePostInfo, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("not_found 应静默成功: status=%d body=%v", status, body)
+	}
+	if _, ok := body["detail"]; ok {
+		t.Error("静默成功不应带 detail")
+	}
+}
+
+func TestUpdatePostInfo_OtherErrorsPassThrough(t *testing.T) {
+	// 500 之类的错误绝不能被吞
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(500, "internal.error", "炸了", "null")
+	})
+	r := legacyReq("PUT", "/update/post/updatePostInfo", "", []byte(`{"slug":"x","title":"t"}`), nil)
+	status, body := run(t, updatePostInfo, f.client(), r)
+	if status != 500 {
+		t.Fatalf("status=%d", status)
+	}
+	if _, ok := body["detail"]; !ok {
+		t.Error("500 要带 detail")
+	}
+}

@@ -271,3 +271,110 @@ func TestListApplications(t *testing.T) {
 		t.Error("旧 applications 接口没有 totalCount")
 	}
 }
+
+// ---------- 写接口「目标不存在」静默成功 + addFlink upsert（GO-002） ----------
+
+func TestUpdateFlink_MissingTargetSilentSuccess(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(404, "link.not_found", "友链不存在", "null")
+	})
+	r := legacyReq("PUT", "/update/flink/updateFlink", "", []byte(`{"group":"g","id":"x"}`), nil)
+	status, body := run(t, updateFlink, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("not_found 应静默成功: status=%d body=%v", status, body)
+	}
+}
+
+func TestMoveFlinkGroup_MissingTargetSilentSuccess(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(404, "link.not_found", "源分组或友链不存在", "null")
+	})
+	r := legacyReq("POST", "/update/flink/moveFlinkGroup", "", []byte(`{"from_group":"a","to_group":"b","link_id":"x"}`), nil)
+	status, body := run(t, moveFlinkGroup, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("not_found 应静默成功: status=%d body=%v", status, body)
+	}
+}
+
+func TestUpdateGroup_MissingTargetSilentSuccess(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		return errResp(404, "link.not_found", "分组不存在", "null")
+	})
+	r := legacyReq("PUT", "/update/flink/updateGroup", "", []byte(`{"old_name":"a","name":"b"}`), nil)
+	status, body := run(t, updateGroup, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("not_found 应静默成功: status=%d body=%v", status, body)
+	}
+}
+
+func TestAddFlink_UpsertCreatesMissingGroup(t *testing.T) {
+	// 旧 addFlink 是 upsert：组不存在要静默建组（order/description 用缺省值）再塞链
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		switch {
+		case c.Path == "/links/list":
+			return okResp(`[{"name":"已有组","links":[]}]`, `{"count":1}`)
+		case c.Path == "/links/groups/create":
+			return okResp(`{"created":true}`, "")
+		case c.Path == "/links/create":
+			return okResp(`{"created":true}`, "")
+		}
+		return 404, `{"ok":false,"error":{"code":"not_found.route","message":"nope","details":null}}`, nil
+	})
+	r := legacyReq("POST", "/update/flink/addFlink", "", []byte(`{"group":"新组","id":"i1","name":"n","url":"https://x.example","avatar":"https://a/p.png","description":"d","color":"#888888","latency":0}`), nil)
+	status, body := run(t, addFlink, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("addFlink 应成功: status=%d body=%v", status, body)
+	}
+	var created, linked bool
+	for _, h := range f.history {
+		if h.Method == "POST" && h.Path == "/links/groups/create" {
+			created = true
+			var got map[string]any
+			if err := json.Unmarshal(h.Body, &got); err != nil {
+				t.Errorf("建组 body 不是 JSON: %s", h.Body)
+			} else if got["name"] != "新组" || got["order"] != float64(0) || got["description"] != "" {
+				t.Errorf("建组 body 不对: %s", h.Body)
+			}
+		}
+		if h.Method == "POST" && h.Path == "/links/create" {
+			linked = true
+		}
+	}
+	if !created || !linked {
+		t.Errorf("应先建组再塞链: created=%v linked=%v", created, linked)
+	}
+}
+
+func TestAddFlink_GroupExists_SkipsCreate(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		if c.Path == "/links/list" {
+			return okResp(`[{"name":"新组","links":[]}]`, `{"count":1}`)
+		}
+		return okResp(`{"created":true}`, "")
+	})
+	r := legacyReq("POST", "/update/flink/addFlink", "", []byte(`{"group":"新组","id":"i1","name":"n","url":"https://x.example","avatar":"https://a/p.png","description":"d","color":"#888888","latency":0}`), nil)
+	status, body := run(t, addFlink, f.client(), r)
+	if status != 200 || body["message"] != "success" {
+		t.Fatalf("addFlink 应成功: status=%d body=%v", status, body)
+	}
+	for _, h := range f.history {
+		if h.Path == "/links/groups/create" {
+			t.Error("组已存在不应再调建组")
+		}
+	}
+}
+
+func TestAddFlink_CreateConflictStillFails(t *testing.T) {
+	// addFlink 对真正的业务错误（slug/组冲突之外）仍要透传，不能全吞
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		if c.Path == "/links/list" {
+			return okResp(`[{"name":"新组","links":[]}]`, `{"count":1}`)
+		}
+		return errResp(409, "link.id_conflict", "友链 id 已存在", "null")
+	})
+	r := legacyReq("POST", "/update/flink/addFlink", "", []byte(`{"group":"新组","id":"i1","name":"n","url":"https://x.example","avatar":"https://a/p.png","description":"d","color":"#888888","latency":0}`), nil)
+	status, body := run(t, addFlink, f.client(), r)
+	if status != 409 {
+		t.Fatalf("非 not_found 冲突应透传: status=%d body=%v", status, body)
+	}
+}
