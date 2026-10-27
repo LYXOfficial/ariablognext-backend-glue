@@ -65,10 +65,18 @@ func callUpstreamSilent(ctx context.Context, c *upstream.Client, r *http.Request
 	match silentMatch,
 	rewrite func(env *envelope) (int, any),
 ) (int, any) {
-	status, raw, err := c.Do(ctx, method, upstreamPath, q, body, forwardHeaders(r))
+	status, raw, upHdr, err := c.DoWithHeader(ctx, method, upstreamPath, q, body, forwardHeaders(r))
 	if err != nil {
 		// 连不上新后端：转成 502，文案说清楚是胶水这层的事
 		return 502, map[string]any{"detail": map[string]any{"message": "fail", "error": "接口服务暂时不可用，请稍后重试"}}
+	}
+	// 304 协商缓存透传：上游（ETag 现算）说「没变」，把 ETag 递回客户端、body 为空。
+	// 这是实时语义（上游每次都现算指纹），不是 TTL 缓存——数据一变 ETag 立刻变。
+	if status == http.StatusNotModified {
+		if etag := upHdr.Get("ETag"); etag != "" {
+			setRespHeader(ctx, "ETag", etag)
+		}
+		return http.StatusNotModified, nil
 	}
 	if status >= 400 {
 		env, decErr := decodeEnvelope(raw)
@@ -100,6 +108,10 @@ func forwardHeaders(r *http.Request) map[string]string {
 	hdr := map[string]string{}
 	if v := r.Header.Get("Authorization"); v != "" {
 		hdr["Authorization"] = v
+	}
+	// If-None-Match：协商缓存的验证头（上游 ETag 现算，304 永远反映最新数据）
+	if v := r.Header.Get("If-None-Match"); v != "" {
+		hdr["If-None-Match"] = v
 	}
 	// Content-Type 不在这里带：upstream.Do 会按 body 形态决定
 	// （JSON / multipart 的值完全不同），带过去反而会覆盖错。

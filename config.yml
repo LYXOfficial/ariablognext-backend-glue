@@ -20,6 +20,7 @@ upstream:
     - Authorization
     - Content-Type
     - Accept
+    - If-None-Match
 
 cors:
   allowOrigins: ["*"]

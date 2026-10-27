@@ -56,6 +56,12 @@ func (a *adapter) writeResponse(route Route) http.HandlerFunc {
 			}
 		}
 
+		if status == http.StatusNotModified {
+			// 304 必须无 body（有 body 反而是协议违规）；ETag 已在 respHeader 里带上
+			w.WriteHeader(status)
+			return
+		}
+
 		switch b := body.(type) {
 		case []byte:
 			// 原样直通的响应（sitemap XML）：Content-Type 由转换函数透传

@@ -1,6 +1,7 @@
 package legacy
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -331,5 +332,26 @@ func TestSearchPostsTrimsToLegacyShape(t *testing.T) {
 		if _, ok := items[0][k]; ok {
 			t.Errorf("新字段 %s 不应出现在旧契约搜索结果里：%v", k, items[0])
 		}
+	}
+}
+
+// 304 协商缓存透传：上游 ETag 现算（实时语义），glue 只递话不缓存——
+// 客户端带 If-None-Match 命中时，glue 原样回 304 + ETag、body 为空（304 带 body 是协议违规）。
+func TestSearchPostsNotModifiedPassthrough(t *testing.T) {
+	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
+		if c.Headers.Get("If-None-Match") != `"v1"` {
+			t.Errorf("If-None-Match 应转发给上游，得到 %q", c.Headers.Get("If-None-Match"))
+		}
+		return 304, "", map[string]string{"ETag": `"v1"`}
+	})
+	// 白名单要含 If-None-Match（生产 config.yml 已加；测试里显式给）
+	c := upstream.New(f.srv.URL, 5*time.Second, []string{"Authorization", "Content-Type", "If-None-Match"})
+	req := legacyReq("GET", "/get/post/searchPosts", "query=x", nil, map[string]string{"If-None-Match": `"v1"`})
+	status, body := searchPosts(context.Background(), c, req)
+	if status != 304 {
+		t.Fatalf("应透传 304，得到 %d：%v", status, body)
+	}
+	if body != nil {
+		t.Errorf("304 不应有 body：%v", body)
 	}
 }
