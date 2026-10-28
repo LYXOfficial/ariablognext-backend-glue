@@ -163,7 +163,7 @@ if type == "full" {
 | `GET /get/post/postNavigation` | `GET /posts/navigation` | `slug` | `{message, previous:data.newer, next:data.older}` |
 | `GET /get/post/relatedPosts` | `GET /posts/related` | `limit=6` | `{message, data}`（无 tag 时新后端返回 `[]`，旧接口是 404，按 `[]` 输出）|
 | `GET /get/post/postSummary` | `GET /posts/summary` | `slug` | `{message, data:data.summary}` |
-| `GET /get/post/searchPosts` | `GET /posts/list` | `query → keyword`，`pageSize=100` | `{message, data}` |
+| `GET /get/post/searchPosts` | `GET /posts/semantic` | `query → query`（2026-10-28 用户指令：语义开关由后端分流，关时回退关键词）| `{message, data}` |
 | `GET /get/post/searchPostsByTitle` | `GET /posts/list` | `title → keyword`，`titleOnly=true` | `{message, data}` |
 | `GET /get/post/searchPostsByTitleCount` | `GET /posts/list?countOnly=true` | 同上 | `{message, count:meta.count}` |
 | `GET /get/tag/tags` | `GET /tags/list` | – | `{message, data}` |

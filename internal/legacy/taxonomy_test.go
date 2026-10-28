@@ -101,13 +101,20 @@ func TestArchiveInfo_NonEmpty(t *testing.T) {
 
 // ---------- search 系列 ----------
 
-func TestSearchPosts_QueryToKeyword(t *testing.T) {
+func TestSearchPosts_QueryToSemantic(t *testing.T) {
+	// 2026-10-28 用户指令：searchPosts 改打 /posts/semantic（语义开关由后端分流）
 	f := newFakeUpstream(t, func(c *capture) (int, string, map[string]string) {
-		return okResp(`[{"slug":"a","context":"...命中..."}]`, `{"count":1}`)
+		return okResp(`[{"slug":"a","context":"...命中...","score":0.6}]`, `{"count":1}`)
 	})
 	_, body := run(t, searchPosts, f.client(), legacyReq("GET", "/get/post/searchPosts", "query=肥鱼", nil, nil))
-	if f.last.Query.Get("keyword") != "肥鱼" || f.last.Query.Get("pageSize") != "100" {
-		t.Errorf("query→keyword 换算错误: %v", f.last.Query)
+	if f.last.Path != "/posts/semantic" {
+		t.Errorf("上游路径应为 /posts/semantic，实际 %s", f.last.Path)
+	}
+	if f.last.Query.Get("query") != "肥鱼" {
+		t.Errorf("query 应原样透传: %v", f.last.Query)
+	}
+	if f.last.Query.Get("pageSize") != "" || f.last.Query.Get("limit") != "" {
+		t.Errorf("不应带分页/limit 参数（语义端点不限个数）: %v", f.last.Query)
 	}
 	if _, ok := body["data"]; !ok {
 		t.Error("缺 data")

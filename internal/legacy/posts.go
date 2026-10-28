@@ -154,15 +154,17 @@ func summaryFrom(ctx context.Context, c *upstream.Client, r *http.Request, metho
 		})
 }
 
-// searchPosts: GET /get/post/searchPosts?query= → GET /posts/list?keyword=&pageSize=100
+// searchPosts: GET /get/post/searchPosts?query= → GET /posts/semantic?query=
+// （2026-10-28 用户指令：搜索改走语义端点。后端按开关自动分流——
+// semanticSearch 开 = 语义+关键词 RRF 混合；关 = 回退纯关键词。
+// 两侧返回的条目形状一致，glue 无需感知；不再传 pageSize，语义端点不限个数。）
 //
 // 旧契约搜索单条只有 slug/title/publishTime/context 四个字段；新接口列表项带
-// plainContent/description/bannerImg 等完整字段（33 条命中 34KB vs 旧 10KB）。
-// 照单直传会把搜索响应撑大 3.4 倍，这里裁剪回旧契约——前端搜索卡片本来也
-// 只用这四个字段（旧后端从来没给过别的）。
+// plainContent/bannerImg/score 等额外字段。照单直传会把搜索响应撑大，
+// 这里裁剪回旧契约——前端搜索卡片本来也只用这四个字段。
 func searchPosts(ctx context.Context, c *upstream.Client, r *http.Request) (int, any) {
-	q := url.Values{"keyword": {r.URL.Query().Get("query")}, "pageSize": {"100"}}
-	return callUpstream(ctx, c, r, http.MethodGet, "/posts/list", q, nil, detailObject,
+	q := url.Values{"query": {r.URL.Query().Get("query")}}
+	return callUpstream(ctx, c, r, http.MethodGet, "/posts/semantic", q, nil, detailObject,
 		func(env *envelope) (int, any) {
 			return 200, okEnvelope(map[string]any{"data": trimSearchItems(env.Data)})
 		})
